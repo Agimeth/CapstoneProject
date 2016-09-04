@@ -1,0 +1,619 @@
+
+<center><h3>Coursera Capstone Project - Milestone Report</center></h3>
+<center><h5>Jean-Michel Coeur, Capstone Project, 4 September 2016</h5></center>
+
+### 1. Summary
+
+People are spending an increasing amount of time on their mobile devices for email, social networking, banking and a whole range of other activities. Smart keyboards are making easier for people to type on their mobile devices.
+If the user type: `I went to the` , the smart keyboard will present three options for what the next word might be. For example, the three potential words might be `gym`, `restaurant` or `shop`.
+
+[SwiftKey](https://swiftkey.com/en), the partner for this Capstone project, is a leader in this area. The objective of this project is to understand and build predictive text models like those used by SwiftKey for its smart keyboard. This model will be embedded into a Shiny application, which will take multiple words in input, and predict the next word when the user clicks submit.
+
+This [Natural language processing](https://en.wikipedia.org/wiki/Natural_language_processing) project includes the typical phases of a datascience project covered in the Coursera datascience specialization:
+
+  - Getting and cleaning data
+  - Exploratory data analysis
+  - Performing Statistical Inference
+    Characteristics of many smaller text samples will approximate the characteristics of a larger population. Therefore, we shall use smaller samples when testing algorithms instead of taking directly 60% or 70% of the data as training set.
+  - Identify features to include in the predictive model
+  - Build the predictive model
+  - Test, refine and optimize the model for its usage in the application context: light weight model to be used in a Shiny application.
+
+This report is focus on the Exploratory Analysis results and includes:
+
+  - Understanding the data,
+  - Getting and Cleaning the Data
+  - Exploratory Data Analysis
+   
+I have ommitted some of the code to make this report concise. The complete code is avalable [here]().
+
+### 2. Understanding the Data (Task 0)
+
+The data in use for this project is from a corpus called [HC Corpora](www.corpora.heliohost.org) and available at [Capstone dataset](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip).
+
+#### 2.1. Downloading the data
+
+```{r Setting Environment, eval = TRUE, echo = FALSE}
+setwd("/Users/jmcoeur/Documents/workspaceR/1.DataScience/91.CapstoneProject/")
+```
+
+
+```{r GettingData, eval = FALSE, echo = TRUE, warning = FALSE}
+require(R.utils) # required to manipulate files
+
+# Getting the data for the Capstone project
+url_data <- "(https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+file_name <- "Coursera-SwiftKey.zip"
+
+if (!file.exists(paste("./Data/", file_name, sep = ""))) 
+  download.file(url_data, paste("./Data/", file_name, sep = ""), method="curl")
+
+# Unzip the data
+if (!dir.exists("./Data/final"))
+  unzip(paste("./Data/", file_name, sep = ""), exdir = "./Data")
+```
+
+The zip file ```Coursera-SwiftKey.zip``` includes texts written in four languages (German, US English, Finish and Russian), coming from three different sources: blogs, news and twitter feeds.
+For this analysis, we only use the files in US English, covering the three sources: 
+
+  - en_US.blogs.txt,
+  - en_US.news.txt
+  - en_US.twitter.txt.
+
+```{r UtilitiesFunction, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+#Sys.setlocale("LC_TIME", "en_US.UTF-8")
+
+# Read a file entirely
+read_file <- function (filename, nblines) {
+  connect <- file(filename, "r") 
+  # We read the first nblines lines or the entire text
+  if (nblines != 0)
+    en_US_text <- readLines(connect, nblines, encoding = "UTF-8")
+  else 
+      en_US_text <- readLines(connect, encoding = "UTF-8")
+  close(connect)
+  return (en_US_text)
+}
+
+```
+
+At a first glance, we look at the size, the number of lines and words of each text.
+
+```{r FileInfo_SizeLinesWords, eval = TRUE, echo = TRUE, warning = FALSE, message = FALSE}
+require(stringr)
+require(stringi)
+require(knitr)      # Results Test formatting
+
+us_data_dir <- "./Data/final/en_US/"
+names_files <- list.files(path = us_data_dir, pattern = "*.txt", recursive = FALSE, 
+                         ignore.case = TRUE) 
+list_files <- paste(us_data_dir, names_files, sep = "")
+
+if (!file.exists(paste("./Data/", "text_info.csv", sep = ""))) {
+  # Compute size in MB
+  text_info <- data.frame(size = file.info(list_files)$size / 1024 ^2)
+  rownames(text_info) <- names_files
+  # Read the three texts entirely
+  list_texts <- lapply(list_files, read_file, 0)
+  names(list_texts) <- c("blog", "news","twitter")
+  
+  # Count number of lines and words
+  text_info$nblines <- lengths(list_texts)
+  text_info$nbwords <- lapply(list_texts, function(x) sum(stri_count(x, regex="\\S+")))[[1]]
+
+  write.csv(x = text_info, file = "./Data/text_info.csv", row.names = TRUE)
+} else {
+  text_info <- read.csv(file = "./Data/text_info.csv")
+  names(text_info) <- c("Type of text", "Size (MB)", "Nb lines", "Nb words")
+}
+
+kable(text_info)
+```
+
+Here are a few lines from each text, some of which contain UTF-8 encoded characters. Examples: <U+2032>, <U+2019>
+
+```{r ManipulateData, eval = TRUE, echo = FALSE}
+# Print out the three text samples
+list_sample <- lapply(lapply(list_files, read_file, 2000), sample, 3)
+cat("Blog Text:\n", list_sample[[1]])
+cat("News Text:\n", list_sample[[2]])
+cat("Twitter Text:\n", list_sample[[3]])
+
+```
+
+
+### 3. Getting and Cleaning the Data (Task 1)
+
+#### 3.1 Sampling the data
+
+Given the size of overal dataset (550Mb), we proceed with a sampling approach across the three datasets, to cover the three styles of writing.
+We take an arbitray 10% of each dataset, limiting the size of the data that we need to clean, and the required computing power during this exploratory analysis.
+The three sample files (Blog, News, Twitter) are stored in RDA format, for efficiency and future processing. 
+
+```{r SamplingData, eval = FALSE, echo = FALSE}
+# Directory where we store the sample texts in compressed RDA format
+us_sample_data_dir <- "./Data/samples/"
+
+if (!file.exists(paste(us_sample_data_dir, "blog_sample.rda", sep = ""))) {
+  # To simulate 10%, we use rbinom with 1 trial and 0.1 probability 
+  set.seed(1788) # Ensure reproducibility
+  records_to_take <- lapply(list_texts, function (x) {rbinom(length(x), 1, 0.1)})
+  
+  # Retrieve the selected records on each dataset
+  blog_sample = list_texts[['blog']][which(records_to_take[[1]] == 1)]
+  news_sample = list_texts[['news']][which(records_to_take[[2]] == 1)]
+  twitter_sample = list_texts[['twitter']][which(records_to_take[[3]] == 1)]
+  
+  # Save as RDA file for speed of reading and compression
+  save(blog_sample, file=paste(us_sample_data_dir, "blog_sample.rda", sep = ""))
+  save(news_sample, file=paste(us_sample_data_dir, "news_sample.rda", sep = ""))
+  save(twitter_sample, file=paste(us_sample_data_dir, "twitter_sample.rda", sep = ""))
+
+  rm(list_texts)
+} else {
+  load(file=paste(us_sample_data_dir, "blog_sample.rda", sep = ""))
+  load(file=paste(us_sample_data_dir, "news_sample.rda", sep = ""))
+  load(file=paste(us_sample_data_dir, "twitter_sample.rda", sep = ""))
+}
+
+# Store the three text in a list
+list_samples <- list(blog = blog_sample, news = news_sample, twitter = twitter_sample)
+```
+
+
+#### 3.2 Tokenization of the data
+
+Before tokenizing the data, we perform the following cleaning steps:
+
+  - Put everything in lower case to facilitate character recognition in subsequent cleaning phase
+  - Remove plain numbers, which can't reasonably be predicted: "04."...
+  - Remove numbers related to items (#6), pages (p.1-140), amounts ($506, $30.1, $82M), dates (1950s), times (7-8:30 a.m., 5:32) or phone numbers (636-751-1135)
+  - Remove numbers related to age: 33-year
+  - Remove \\"
+  - Remove punctuation without removing strings such as: in "St. Charles" expression
+  - Remove "bad words" like in the sentence: "Shit just got angsty"
+  - Remove smileys, prevalent in twitter text: ;-)
+  - Clean single letter word, like in the following sentence: "Simmered w simple syrup n rosemary"? 
+    Here, w means "with" and "n" means "and". However, it might be too much an effort to impute correctly their replacement without affecting the construction of a subsequent predictive model.
+  
+To perform the cleaning and the tokenization of the texts, we use the ```tm``` package from [CRAN Task View: Natural Language Processing](http://cran.r-project.org/web/views/NaturalLanguageProcessing.html).
+
+```{r Tokenization, eval = FALSE, echo = TRUE, message = FALSE}
+require(tm) # Includes NLP & slam packages
+
+# Tokenization - identifying appropriate tokens such as words, punctuation, and numbers. 
+# Writing a function that takes a file as input and returns a tokenized version of it.
+CleanTokenize <- function (datasample) {
+  # We create a virtual corpus, which is a list of documents. Each document corresponds to
+  # one line of the original text.
+  textCorpus <- VCorpus(VectorSource(datasample),
+                        readerControl = list(language = "en"))
+  
+  toSpace <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+  toQuote <- content_transformer(function(x, pattern) gsub(pattern, "'", x))
+  toDash <- content_transformer(function(x, pattern) gsub(pattern, "-", x))
+  toDot <- content_transformer(function(x, pattern) gsub(pattern, ".", x))
+  toNull <- content_transformer(function(x, pattern) gsub(pattern, "", x))
+  toEnd <- content_transformer(function(x, pattern) gsub(pattern, " <END> ", x))
+  toNum <- content_transformer(function(x, pattern) gsub(pattern, " <NUM> ", x))
+  toAnd <- content_transformer(function(x, pattern) gsub(pattern, " and ", x))
+  toWill <- content_transformer(function(x, pattern) gsub(pattern, " will", x))
+  
+  # We first transform the text in lower case
+  cleaned_text <- tm_map(textCorpus, content_transformer(tolower), lazy = TRUE)
+
+  # Replace topics numbers & amounts related numbers by <NUM>
+  # Example: 10th , 209.2%, -26, +43
+  # This will help detecting words next to any number in the future model.
+  numPattern = "([0-9]+)|(#[0-9]+)|([$0-9]+)|([-\\+]?[0-9%]+[\\.]?[0-9%(th)]+)"
+  cleaned_text <- tm_map(cleaned_text, toNum, numPattern)
+  
+  cleaned_text <- tm_map(cleaned_text, toDot, "[\\.]+")
+  cleaned_text <- tm_map(cleaned_text, toNull, "[\\+]+|[\\=]+|[\u20AC\u0097\u00A3\u00B7]|+")
+  # Remove email addresses and URLs
+  cleaned_text <- tm_map(cleaned_text, toNull, "\\@[a-z]*|www(\\.[a-z]*)*")
+
+  # Detect end of sentence with ". ", "! ", "? " (within a line or at the end of a line) 
+  # and replace by "<END>"
+  cleaned_text <- tm_map(cleaned_text, toEnd, "\\. |[\\.]+$|\\! |[\\!]+$|\\? |\\?$|[\\?]+")
+  cleaned_text <- tm_map(cleaned_text, toSpace, "[\\!]+")
+  
+  # Remove '\"' , ' - ' , '*', curly quotes and ellipsis characters
+  quotesPattern <- '[%]|[\\*]|[(\\")]| - |[\u2013\u2014\u201C\u201D\u2026\uFF5E\u305D\u2032\u2033]'
+  cleaned_text <- tm_map(cleaned_text, toSpace, quotesPattern)
+  cleaned_text <- tm_map(cleaned_text, toQuote, "[\u2018\u2019\u00B0]")
+  cleaned_text <- tm_map(cleaned_text, toAnd, "[&]")
+  cleaned_text <- tm_map(cleaned_text, toWill, "'ll")
+  
+  # Replace '-', '/', '(', ')', '[' and ']' characters and parenthesis by a space
+  cleaned_text <- tm_map(cleaned_text, toSpace, "[-]+|[~]+|/| \\(|\\(|\\)|\\) |[\\{\\}]|[\\.]+|[\\[\\]]")
+  
+  # We remove the punctuation , : ; and single quotes
+  cleaned_text <- tm_map(cleaned_text, toSpace, ":|, |,|'s | ' | ; |;| '|' |'")
+  
+  # We remove single letters between words and hashtags, prominent in twitter feeds
+  # except "a" (article) and "i" (I). Example: "Simmered w simple syrup n rosemary"
+  cleaned_text <- tm_map(cleaned_text, toSpace, " [b-hj-z] |#")
+  
+  # We remove whitespaces at the very end given the additional
+  # spaces that we may have generated during the previous cleanup phases.
+  # This time, we use of default function "stripWhitespace"
+  cleaned_text <- tm_map(cleaned_text, stripWhitespace)
+  
+  # We remove any dupplication of <NUM> due to consecutive numbers
+  cleaned_text <- tm_map(cleaned_text, toEnd, "(<END> )+")
+  cleaned_text <- tm_map(cleaned_text, toNum, "(<NUM> )+")
+  
+  return (cleaned_text)
+} 
+```
+
+Note we kept the english stop words for now (the, a, at, and, me ...), which count usually to 20-30% of total word counts. These words are prevalent in the language and important to build the future prediction model. However, these might "polute" the predictive model with unwanted noise. More about this at Paragraph 5 (Task 3) below.
+
+#### 3.3 Getting Profanity database
+
+To remove the profanity and other words that we do not want to predict, I did google "Offensive words in English" and identified several URLs pointing to "bad english words" datasets:
+
+- [Dirty Naughty Obscene and Otherwise Bad Words](https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words)
+- [Naughty word list, compiled by Google and @jamiew](https://gist.github.com/jamiew/1112488)
+- [Bad words](http://www.cs.cmu.edu/~biglou/resources/bad-words.txt)
+  This last list was too broad, with many of the words not being really "offending" like "canadian", "cancer", "catholic" just to name a few.
+  
+The Dirty Naughty Obscene and Otherwise Bad Words seems to be the nost promising, taken from its github repository.
+
+```{r GettingProfanityDBCleaningDataset, eval = TRUE, echo = FALSE}
+require(httr)
+require(XML)
+
+prof_url <- "https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/blob/master/en"
+file_name <- "offensive_words_english.txt"
+
+if (!file.exists(paste("./Data/", file_name, sep = ""))) {
+    htmldoc = GET(prof_url)
+    doc = htmlParse(htmldoc, asText = TRUE)
+    table_result <- xpathSApply(doc, "//*/table[@class='highlight tab-size js-file-line-container']/tr/td", xmlValue)
+    # Remove empty values
+    table_profanity <- table_result[table_result != ""]
+    write.csv(table_profanity, file = paste("./Data/", file_name, sep = ""),
+              row.names = FALSE)
+    profanity <- data.frame(ProfanityWords = table_profanity)
+} else 
+    profanity <- read.csv(paste("./Data/", file_name, sep = ""))
+
+```
+
+Based on my limited knowledge of English "bad words", this list of 377 words seemmed to be legitimate. Therefore, I didn't add nor remove any additional word.
+
+#### 3.4 Tokenizing and Profanity filtering 
+
+```{r ProfanityFiltering, eval = FALSE, echo = TRUE, message = FALSE, warnings = FALSE}
+# Directory where we store the sample texts in compressed RDA format
+us_cleaned_data_dir <- "./Data/cleaned/"
+
+if (!file.exists(paste(us_cleaned_data_dir, "blog_cleaned.rda", sep = ""))) {
+  # We clean the corpus from any "bad word" that we don't want to predict
+  cleaned_blog <- SimpleCleanTokenize(list_samples[[1]])
+  cleaned_blog <- tm_map(cleaned_blog, removeWords, profanity$x)
+
+  cleaned_news <- CleanTokenize(list_samples[[2]])
+  cleaned_news <- tm_map(cleaned_news, removeWords, profanity$x)
+
+  cleaned_twitter <- CleanTokenize(list_samples[[3]])
+  cleaned_twitter <- tm_map(cleaned_twitter, removeWords, profanity$x)
+
+  # Save as RDA file for speed of reading and compression
+  save(cleaned_blog, file=paste(us_cleaned_data_dir, "blog_cleaned.rda", sep = ""))
+  save(cleaned_news, file=paste(us_cleaned_data_dir, "news_cleaned.rda", sep = ""))
+  save(cleaned_twitter, file=paste(us_cleaned_data_dir, "twitter_cleaned.rda", sep = ""))
+
+  rm(blog_sample);rm(news_sample);rm(twitter_sample);
+  rm(list_samples)
+} else {
+  # Save as RDA file for speed of reading and compression
+  load(file=paste(us_cleaned_data_dir, "blog_cleaned.rda", sep = ""))
+  load(file=paste(us_cleaned_data_dir, "news_cleaned.rda", sep = ""))
+  load(file=paste(us_cleaned_data_dir, "twitter_cleaned.rda", sep = ""))
+}
+```
+
+### 4. Exploratory Data Analysis (Task 2)
+
+With three cleaned datasets, we look at:
+
+  - How frequently a word appears in each dataset
+  - How frequently pairs of words appear together
+  - How frequently triple of words appear together.
+
+This will give some clues of probability a given word may appear based on previous one or two words.
+These set of words are called [N grams](https://en.wikipedia.org/wiki/N-gram).
+
+We are also looking at the distribution of the words to identify potential optimization in the future. How many unique words do we need in a frequency sorted dictionary to cover 50% of all word instances in the language? to cover 90% of all words instances? To cover 99% of all words instances?
+  
+#### 4.1 Frequency of words, pairs of words and triple of words
+    
+We build a Term Document matrix, which identifies the list of occurence of a particular word in the documents. Each line of the matrix corresponds to a word. Each column correspondong to a document / sentence, extracted from the three texts.
+To compute the frequency of a given word (matrix row), we sum up the number of occurences of a given word across all documents (matrix columns). By using the ```row_sum()``` function from the [R slam package](https://cran.r-project.org/web/packages/slam/index.html), we keep all words entrie in the matrix, even if a given word only appear once in the corpora. I believe this provide a better overview of the n-grams distribution compare to an arbitary cut at 0.1% frequency for example.
+
+```{r BuildN_grams, eval = FALSE, echo = TRUE, message = FALSE, warning = FALSE}
+require(slam)
+
+# Compute frequence of words from a given Term Document Matrix
+ComputeFrequence <- function (tdm) {
+  df_freq <- data.frame(term = tdm$dimnames$Terms, 
+                             freq = slam::row_sums(tdm))
+  df_freq <- df_freq[order(df_freq$freq, decreasing = TRUE),]
+
+  # Remove foreign words by identifying non ascii characters and removing the corresponding line
+  mots <- iconv(df_freq$term, from = "UTF-8", to = "ASCII", sub = "#####")
+  remove_foreign <- grep("#####", mots)
+  df_freq <- df_freq[-remove_foreign,]
+  
+  # We remove <END> and <NUM> from the terms
+  to_remove <- grep("<end>", df_freq$term) # Get the non-zeros
+  if (length(to_remove) != 0) 
+    df_freq <- df_freq[-to_remove, ]
+
+  df_freq$percent = round( df_freq$freq * 100 / sum(df_freq$freq), 4)
+  df_freq$cummulpercent = round(cumsum(df_freq$freq) * 100 / sum(df_freq$freq), 4)
+
+  # Convert factor into character
+  df_freq$term <- as.character(df_freq$term)
+
+  return (df_freq)
+}
+# I use my own tokenizer functions. RWeka::NGramTokenizer() got challenges with the underlying
+# rJava package on MacOS.
+bigramTokenizer <-  function(x) {
+    unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)
+}
+trigramTokenizer <-  function(x) {
+    unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)
+}
+quadrigramTokenizer <-  function(x) {
+    unlist(lapply(ngrams(words(x), 4), paste, collapse = " "), use.names = FALSE)
+}
+# Build n-grams (single, two and three words) from the three texts
+get_ngram <- function(cleaned_text, n) {
+  # Creating a Term Document Matrix: each row represents one term and each column the document number.
+  # The matrix cell value is the frequency of a given term in a given document.
+  tdm_text <- switch (n, 
+                      TermDocumentMatrix(cleaned_text), 
+                      TermDocumentMatrix(cleaned_text, control = list(tokenize = bigramTokenizer)),
+                      TermDocumentMatrix(cleaned_text, control = list(tokenize = trigramTokenizer)),
+                      TermDocumentMatrix(cleaned_text, control = list(tokenize = quadrigramTokenizer)))
+  return(tdm_text) # List of dataframes
+}
+```
+
+```{r ExploratoryAnalysis, eval = TRUE, echo = FALSE, message = FALSE}
+# Compute statistics for each text, for each n-gram
+buildTextStatistics <- function(ngram = 1) {
+
+    ng_blog <- ComputeFrequence(get_ngram(cleaned_blog, ngram)); ng_blog$type <- "blog"
+    ng_news <- ComputeFrequence(get_ngram(cleaned_news, ngram)); ng_news$type <- "news"
+    ng_twitter <- ComputeFrequence(get_ngram(cleaned_twitter, ngram)); ng_twitter$type <- "twitter"
+    
+    # Build resulting dataframe of ngrams from each text
+    df_ngtext <- rbind(ng_blog, ng_news, ng_twitter)
+    df_ngtext$type <- as.factor(df_ngtext$type)
+  
+  return (df_ngtext)
+}
+
+# If stats haven't been computed already, we crunch the numbers
+if (!file.exists(paste("./Data/stats/", "uni_text_info.csv", sep = ""))) {
+  df_unitext <- buildTextStatistics(1)
+  write.csv(x = df_unitext, file = "./Data/stats/uni_text_info.csv")
+  df_bitext <- buildTextStatistics(2)
+  write.csv(x = df_bitext, file = "./Data/stats/bi_text_info.csv")
+  df_tritext <- buildTextStatistics(3)
+  write.csv(x = df_tritext, file = "./Data/stats/tri_text_info.csv")
+  df_quadritext <- buildTextStatistics(4)
+  write.csv(x = df_quadritext, file = "./Data/stats/quadri_text_info.csv")
+} else {
+  # Load previously computed statistics 
+  df_unitext <- read.csv(file = "./Data/stats/uni_text_info.csv")
+  df_bitext <- read.csv(file = "./Data/stats/bi_text_info.csv")
+  df_tritext <- read.csv(file = "./Data/stats/tri_text_info.csv")
+  df_quadritext <- read.csv(file = "./Data/stats/quadri_text_info.csv")
+}
+```
+
+#### 4.2 Distribution of words, pair of words, triple of words
+
+We look at the top 15 words, pairs of words and triple of words in each text. As we didn't remove the stop words from the English (```stopwords()``` ), we find them in abondance in the top n-grams.
+The distribution is relatively similar across the 3 texts, with the exception of news text, which has more numeric words than the other 2 texts.
+
+```{r figures, eval = TRUE, echo  = FALSE, message = FALSE, warnings = FALSE, fig.width = 10, fig.height = 4, fig.align = 'center'}
+require(ggplot2) 
+require(gridExtra)  # Arrange plots in grid
+
+plotFrequency <- function (df_data, title, xlabel = "Top 15 words", col) {
+  df_data$term <- factor(df_data$term, levels = df_data$term[order(df_data$freq, decreasing = FALSE)])
+  g <- ggplot(df_data, aes(x = term, y = freq)) + geom_bar(stat = "identity", color = col) +
+    ggtitle(title) + theme(plot.title = element_text(size = 10)) +
+    xlab(xlabel) + 
+    theme(axis.title.x = element_text(size = 10)) +
+    theme(axis.text.x = element_text(angle = 0, size = 10, hjust = 1)) +
+    ylab("Frequency in text sample") +
+    theme(axis.title.y = element_text(size = 10)) + coord_flip() +
+    facet_wrap(~type)
+  return (g)
+}
+
+# Top 15 unigrams
+n = 15
+g1 <- plotFrequency (df_unitext[df_unitext$type =="blog",][1:n,], "Frequency of words in Blog text", col = 2)
+g2 <- plotFrequency (df_unitext[df_unitext$type =="news",][1:n,], "Frequency of words in News text", col = 3)
+g3 <- plotFrequency (df_unitext[df_unitext$type =="twitter",][1:n,], "Frequency of words in Twitter text", col = 4) 
+grid.arrange(g1, g2, g3, ncol=3)
+
+# Top 15 bi-grams
+g1 <- plotFrequency (df_bitext[df_bitext$type =="blog",][1:n,], "Frequency of pairs of words in Blog text",
+                     "Top 15 pairs of words", col = 2)
+g2 <- plotFrequency (df_bitext[df_bitext$type =="news",][1:n,], "Frequency of pairs of words in News text",
+                     "Top 15 pairs of words", col = 3)
+g3 <- plotFrequency (df_bitext[df_bitext$type =="twitter",][1:n,], "Frequency of pair of words in Twitter text",
+                     "Top 15 pairs of words", col = 4)
+grid.arrange(g1, g2, g3, ncol=3)
+
+# Top 15 tri-grams
+g1 <- plotFrequency (df_tritext[df_tritext$type =="blog",][1:n,], "Frequency of triple words in Blog text",
+                     "Top 15 triple of words", col = 2)
+g2 <- plotFrequency (df_tritext[df_tritext$type =="news",][1:n,], "Frequency of triple words in News text",
+                     "Top 15 triple of words", col = 3)
+g3 <- plotFrequency (df_tritext[df_tritext$type =="twitter",][1:n,], "Frequency of triple words in Twitter text",
+                     "Top 15 triple of words", col = 4)
+grid.arrange(g1, g2, g3, ncol=3)
+```
+
+For each text, we plot the Vocabulary coverage in percentage, by the unigrams, and highlight the number of words that we need in a given text, to cover 90% of the vocabulary of that particular text.
+
+```{r CumulPercentRepresentation, eval = TRUE, echo = FALSE, message = FALSE, warnings = FALSE, fig.align = 'center'}
+
+plotCumPercent <- function (df_data, title) {
+  g <- ggplot(df_data, aes(x = id, y = cummulpercent, color = type)) + geom_point() +
+    ggtitle(title) + theme(plot.title = element_text(size = 11)) +
+    xlab("Coverage based on number of words with 90% vocabulary coverage marks (% of total words)") + 
+    theme(axis.title.x = element_text(size = 11)) +
+    theme(axis.text.x = element_text(size = 11, hjust = 1)) + 
+    ylab("Cumulative percentage") +
+    theme(axis.title.y = element_text(size = 11))
+  return (g)
+}
+
+cutoff <- function(df) {
+  return (c(length(which(df$cummulpercent <= 50)), length(which(df$cummulpercent <= 90)),
+            length(which(df$cummulpercent <= 95)),
+            length(which(df$cummulpercent <= 99))) ) 
+}
+
+# Format dataframe for display
+p = 10000 # we choose arbitrary the top 2500 words from each text sample for display
+df_displayp <- rbind(cbind(df_unitext[df_unitext$type =="blog",][1:p,], id = rep(1:p)),
+                    cbind(df_unitext[df_unitext$type =="news",][1:p,], id = rep(1:p)),
+                    cbind(df_unitext[df_unitext$type =="twitter",][1:p,], id = rep(1:p)))
+
+# Compute cutoff values to reach 90% of vocabulary coverage in each text
+v_coverage <- c(cutoff(df_displayp[df_displayp$type == "blog",])[2] / nrow(df_unitext[df_unitext$type =="blog",]),
+               cutoff(df_displayp[df_displayp$type == "news",])[2] / nrow(df_unitext[df_unitext$type =="news",]),
+               cutoff(df_displayp[df_displayp$type == "twitter",])[2] / nrow(df_unitext[df_unitext$type =="twitter",]),
+               cutoff(df_displayp[df_displayp$type == "blog",])[3] / nrow(df_unitext[df_unitext$type =="blog",]),
+               cutoff(df_displayp[df_displayp$type == "news",])[3] / nrow(df_unitext[df_unitext$type =="news",]),
+               cutoff(df_displayp[df_displayp$type == "twitter",])[3] / nrow(df_unitext[df_unitext$type =="twitter",]),
+               cutoff(df_displayp[df_displayp$type == "blog",])[4] / nrow(df_unitext[df_unitext$type =="blog",]),
+               cutoff(df_displayp[df_displayp$type == "news",])[4] / nrow(df_unitext[df_unitext$type =="news",]),
+               cutoff(df_displayp[df_displayp$type == "twitter",])[4] / nrow(df_unitext[df_unitext$type =="twitter",]))
+v_coverage <- paste(round(v_coverage * 100, 2), "%", sep="")
+
+
+g <- plotCumPercent(df_displayp, "Cumulative percentage of most frequent words in text samples")
+g + geom_hline(yintercept = 90, color = 1, size = 1) + geom_text(aes(0, 90,label = "90%", vjust = -1)) +
+    geom_vline(xintercept = cutoff(df_displayp[df_displayp$type == "blog",])[2], color = 2, size = 1) +
+    geom_text(aes(cutoff(df_displayp[df_displayp$type == "blog",])[2], 20, 
+                  label = v_coverage[1], vjust = -1)) +
+    geom_vline(xintercept = cutoff(df_displayp[df_displayp$type == "news",])[2], color = 3, size = 1) +
+    geom_text(aes(cutoff(df_displayp[df_displayp$type == "news",])[2], 25, 
+                  label = v_coverage[2], vjust = -1)) +
+    geom_vline(xintercept = cutoff(df_displayp[df_displayp$type == "twitter",])[2], color = 4, size = 1) +
+    geom_text(aes(cutoff(df_displayp[df_displayp$type == "twitter",])[2], 15, 
+                  label = v_coverage[3], vjust = -1))
+
+```
+
+Here are the percentage of words of each text required to cover 95% and 99% of vocabulary for each text:
+```{r Coverage, eval = TRUE, echo = FALSE}
+df_cov <- data.frame(Text = c("Blog", "News", "Twitter"), coverage95 = v_coverage[4:6],
+                     coverage99 = v_coverage[7:9])
+df_cov
+```
+
+In future optimization, we might limit the number of n-grams that we consider in order to cover only 90% of the vocabulary.
+
+#### 4.3 Detecting foreign language
+
+A first step is to look at non ASCII character to detect non-English words. This would correctly identify the cyrillic and chinese characters that I found in the texts.
+It would also categorize the following German characters as foreign: über (above), Fährer, Möhren, Gäste, and 
+However, other German words would go undetected: Schwein, Apotheke, Dieter, Supermarkt, Haus, Tish... 
+
+I see three approaches:
+
+- Removing all words with non-ascii characters, which were remaining after the tokenization phase. These foreign words only represent 0.01% of the Blog text sample. This is the current approach in this exploratory analysis.
+- In a second optimization, I could remove each sentence (characters string between <end> markers) that contains a foreign word, If we consider that a foreign word in a sentence indicates a foreign language sentence.
+- To remove with high probability any foreign English word, I would need to use an extensive English dictionary and verify that all words from a given text do belong to the dictionary. Given the rarity of foreign words in the corpora, such computer extensive text cleaning might not change the accuracy of the future predictive model.
+
+```{r ForeignLanguage, eval = FALSE, echo = TRUE}
+# Marking words with non-ascii character
+nonAscii <- function(x) iconv(x, "UTF-8", "ASCII", sub="#####")
+mytext <- "über (above), Fährer"
+foreignWords <- lapply(mytext, nonAscii)
+```
+
+### 5. Modeling (Task 3)
+
+#### 5.1 Build an n-grams model
+
+To build a basic [n-gram](https://en.wikipedia.org/wiki/N-gram) model and predict the next word based on the previous 1, 2, or 3 words, I believe we need to build a second set of n-grams that exclude the English stop words, in order to focus on the "important words" and remove the noise.
+The final n-gram model will use a combination of both models:
+
+  - Model that uses English stop words,
+  - Model that doesn't use English stop words.
+  
+To predict the next word of a given sentence, we need to:
+
+  - Clean the sentence: transform it in lower case, remove punctuation, stop words, special characters
+    We will use a simplified version of the ```CleanTokenize()``` function that we have used to build cleaned corpora.
+  - Extract the last 2 or 3 words,
+  - Identifies the most likely words based on the n-grams model.
+
+The most likely words are derived for the n-grams dataframes computed previously in ```ComputeFrequence()```.
+
+Examples: 
+
+To predict the next word based on two words, I use a 3-grams model. The sentence ```I want``` gets the following results, from the 3-grams:
+
+```{r Trigram, eval = TRUE, echo = FALSE}
+stringToComplete <- "^(i want) "
+occurrences <- grep(stringToComplete, df_tritext$term)
+print(head(df_tritext[occurrences, c(1,2,5)], 5), row.names=FALSE)
+```
+
+To predict the next word based on three words, I use a 4-grams model. The sentence ```in quite some``` gets the following results, from the 4-grams:
+
+```{r QuadriGram, eval = TRUE, echo = FALSE}
+stringToComplete <- "^(in quite some) "
+occurrences <- grep(stringToComplete, df_quadritext$term)
+print(head(df_quadritext[occurrences, c(1,2,5)], 5), row.names=FALSE)
+```
+
+For efficiency, I store the n-grams models in a [Markov chain](https://en.wikipedia.org/wiki/Markov_chain). 
+From Wikipedia: a "Markov chain" refers to the sequence of random variables such a process moves through, with the Markov property defining serial dependence only between adjacent periods (as in a "chain"). 
+A 4-gram can be seen as a chain of 4 states, where what happens on the 4th state depends only on the current state of the system. My Markov chain uses a 4 dimensions transition matrix. This matrix models the frequency of words following 1, 2, or 3 given words. 
+
+To compute the probablility of each n-gram in the transition matrix, I use a [Katz back-off](https://en.wikipedia.org/wiki/Katz%27s_back-off_model) model. 
+From Wikipedia: This model estimates the conditional probability of a word given its history in the n-gram. It accomplishes this estimation by "backing-off" to models with smaller histories under certain conditions. By doing so, the model with the most reliable information about a given history is used to provide the better results.
+
+The conditional probability is computed using the frequency information previously stored in the n-gram dataframes.
+
+If time permits, I might use the [Kneser–Ney smoothing](https://en.wikipedia.org/wiki/Kneser%E2%80%93Ney_smoothing) method as well, to better smooth out the probabilities for n-grams with lower frequencies.
+From Wikipedia: Kneser–Ney smoothing is widely considered the most effective method of smoothing due to its use of absolute discounting by subtracting a fixed value from the probability's lower order terms to omit n-grams with lower frequencies. This approach has been considered equally effective for both higher and lower order n-grams.
+
+#### 5.2 Unseen n-grams - Out-of-vocabulary words
+
+As we build a model with a fixed vocabulary and not with the entire observed vocabulary, we expect to have unseen n-grams from the sentences that is given by the user of the application. 
+I believe that we have two cases:
+
+   - unigram that doesn't exist in the corpora: the user typed an "out of vocabulary word"
+     I attach to this unigram the same conditional probablity than unigrams with low frequency.
+     
+   - n-grams (combination of words) that haven't been seen before, although all idividual words (unigrams) are known.
+     If a word is not seen in the list of 4-grams, I use the Katz model to back-off to 3-grams, then to 2-grams then to unigrams until I identify a partial words match with the initial 3 words.
+     
+
+#### 5.3 Model accuracy
+
+To compute the model accuracy, I take each sentence from the test set, get 3 consecutive words and predict the 4th one with 3 likely results. I consider the prediction accurate of one of the three proposed words matches the 4th word in the sentence.
+
+
+                      ----------------- End of the analysis ----------------- 
+
